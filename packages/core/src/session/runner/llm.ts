@@ -40,6 +40,11 @@ import { Snapshot } from "../../snapshot"
 import { makeLocationNode } from "../../effect/app-node"
 import { llmClient } from "../../effect/app-node-platform"
 
+// Guidance the model receives about mid-run user inputs: text wrapped in the
+// annotation marker is context to incorporate, plain messages while working
+// are instructions to follow and continue.
+const MIDRUN_GUIDANCE = `When the user includes text wrapped in \`[anotación del usuario]\` and \`[/anotación]\`, treat it as context: read it and incorporate it into your current task without changing your plan of work. Only change direction if it directly contradicts your task. Regular user messages received while you are working are instructions: follow them and continue.`
+
 /**
  * Runs one durable coding-agent Session until it settles.
  *
@@ -205,7 +210,7 @@ const layer = Layer.effect(
       const request = LLM.request({
         model,
         providerOptions: { openai: { promptCacheKey } },
-        system: [agent.info?.system, system.baseline]
+        system: [agent.info?.system, system.baseline, MIDRUN_GUIDANCE]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),
         messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],

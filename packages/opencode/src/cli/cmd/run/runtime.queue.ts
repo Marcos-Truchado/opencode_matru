@@ -4,6 +4,13 @@
 // here. The queue drains one turn at a time; ordinary prompts waiting behind
 // an active ordinary turn are exposed for edit/removal until they begin.
 //
+// Prompts flagged with `delivery` bypass the serial queue: they are sent as
+// steers (or core-queued inputs) while a turn is in flight, so the model
+// reads them at the next safe boundary without interrupting the conversation.
+// Ordinary prompts submitted during an active turn are sent as steers too,
+// unless no `onSteer` handler is provided -- then the queue preserves its
+// serial behavior.
+//
 // The queue also handles /exit, /quit, and /new commands, empty-prompt rejection,
 // and tracks per-turn wall-clock duration for the footer status line.
 //
@@ -28,6 +35,7 @@ export type QueueInput = {
   initialInput?: string
   trace?: Trace
   onSend?: (prompt: RunPrompt) => void
+  onSteer?: (prompt: RunPrompt) => void
   onNewSession?: () => void | Promise<void>
   run: (prompt: RunPrompt, signal: AbortSignal) => Promise<void>
 }
@@ -265,6 +273,31 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
     })()
   }
 
+  // Directly sends a prompt without claiming the serial turn. Steers carry
+  // their delivery flag; ordinary prompts steered by the active-turn fallback
+  // get one here.
+  const sendDirect = (prompt: RunPrompt) => {
+    const sent = {
+      ...prompt,
+      delivery: prompt.delivery ?? "steer",
+      messageID: prompt.messageID ?? MessageID.ascending(),
+    }
+    input.onSteer?.(sent)
+    if (!prompt.delivery) {
+      emit(
+        {
+          type: "stream.patch",
+          patch: {
+            status: "steer enviado — el modelo lo aplicará en el siguiente paso",
+          },
+        },
+        {
+          status: "steer enviado — el modelo lo aplicará en el siguiente paso",
+        },
+      )
+    }
+  }
+
   const submit = (prompt: RunPrompt) => {
     if (!prompt.text.trim() || state.closed) {
       return
@@ -273,6 +306,25 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
     if (prompt.mode !== "shell" && isExitCommand(prompt.text)) {
       input.footer.close()
       return
+    }
+
+    if (prompt.delivery) {
+      if (input.onSteer) {
+        sendDirect(prompt)
+        return
+      }
+
+      if (state.active) {
+        const queued: FooterQueuedPrompt = {
+          messageID: prompt.messageID ?? MessageID.ascending(),
+          partID: PartID.ascending(),
+          prompt,
+        }
+        state.queued = [...state.queued, queued]
+        state.queue.push(prompt)
+        syncQueue()
+        return
+      }
     }
 
     const active = state.active
@@ -284,6 +336,11 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
       !prompt.command &&
       !isNewCommand(prompt.text)
     ) {
+      if (input.onSteer) {
+        sendDirect({ ...prompt, delivery: "steer" })
+        return
+      }
+
       const queued: FooterQueuedPrompt = {
         messageID: MessageID.ascending(),
         partID: PartID.ascending(),

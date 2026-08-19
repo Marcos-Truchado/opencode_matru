@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import {
+  annotationPayload,
   createPromptHistory,
   isExitCommand,
   isNewCommand,
   movePromptHistory,
   pushPromptHistory,
+  queuePayload,
+  wrapAnnotation,
 } from "@/cli/cmd/run/prompt.shared"
 import type { RunPrompt } from "@/cli/cmd/run/types"
 
@@ -97,5 +100,29 @@ describe("run prompt shared", () => {
     expect(isNewCommand("/new")).toBe(true)
     expect(isNewCommand(" /NEW ")).toBe(true)
     expect(isNewCommand("/new now")).toBe(false)
+  })
+
+  test("parses the annotation command payload", () => {
+    expect(annotationPayload("/anotacion: cambia el puerto")).toBe("cambia el puerto")
+    expect(annotationPayload("/anotacion cambia el puerto")).toBe("cambia el puerto")
+    expect(annotationPayload(" /ANOTACION:  cambia  ")).toBe("cambia")
+    expect(annotationPayload("/anotacion:")).toBeUndefined()
+    expect(annotationPayload("/anotacion")).toBeUndefined()
+    expect(annotationPayload("hello")).toBeUndefined()
+    expect(annotationPayload("/anotaciones")).toBeUndefined()
+  })
+
+  test("parses the queue command payload", () => {
+    expect(queuePayload("/cola: explica el diseño")).toBe("explica el diseño")
+    expect(queuePayload("/cola explica el diseño")).toBe("explica el diseño")
+    expect(queuePayload("/cola ")).toBeUndefined()
+    expect(queuePayload("/cola")).toBeUndefined()
+    expect(queuePayload("/anotacion: x")).toBeUndefined()
+  })
+
+  test("wraps annotation payloads in the user annotation marker", () => {
+    expect(wrapAnnotation("el deploy es mañana")).toBe(
+      "[anotación del usuario]\nel deploy es mañana\n[/anotación]",
+    )
   })
 })

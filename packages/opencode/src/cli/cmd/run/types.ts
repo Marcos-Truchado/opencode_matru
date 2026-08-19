@@ -40,6 +40,9 @@ export type RunPrompt = {
     name: string
     arguments: string
   }
+  // Delivery override for mid-run sends: "steer" is read at the next safe
+  // boundary; "queue" stays pending until the session would otherwise be idle.
+  delivery?: "steer" | "queue"
 }
 
 export type FooterQueuedPrompt = {

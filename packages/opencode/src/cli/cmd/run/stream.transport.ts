@@ -6,7 +6,9 @@
 // footer through stream.ts.
 //
 // Prompt turns are one-at-a-time: runPromptTurn() sends the prompt, arms a
-// deferred Wait, and resolves when the session becomes idle.
+// deferred Wait, and resolves when the session becomes idle. Steers
+// (runSteer()) bypass the serial turn: they admit a durable input without
+// claiming the Wait, so messages can reach the model mid-run.
 // Prefer session.status idle events, but also poll session.status because some
 // transports can miss status events while still delivering message events. If
 // the turn is aborted (user interrupt), it flushes any in-progress parts as
@@ -97,10 +99,12 @@ export type SessionTurnInput = {
   includeFiles: boolean
   onVisibleOutput?: (anchor: LocalReplayAnchor) => void
   signal?: AbortSignal
+  delivery?: "steer" | "queue"
 }
 
 export type SessionTransport = {
   runPromptTurn(input: SessionTurnInput): Promise<void>
+  runSteer(input: SessionTurnInput): Promise<void>
   selectSubagent(sessionID: string | undefined): void
   replayOnResize(input: SessionResizeReplayInput): Promise<boolean>
   close(): Promise<void>
@@ -125,6 +129,7 @@ type State = {
 
 type TransportService = {
   readonly runPromptTurn: (input: SessionTurnInput) => Effect.Effect<void, unknown>
+  readonly runSteer: (input: SessionTurnInput) => Effect.Effect<void, unknown>
   readonly selectSubagent: (sessionID: string | undefined) => Effect.Effect<void>
   readonly replayOnResize: (input: SessionResizeReplayInput) => Effect.Effect<boolean>
   readonly close: () => Effect.Effect<void>
@@ -1409,6 +1414,58 @@ function createLayer(input: StreamInput) {
           return
         })
 
+        // Sends a prompt to the running session without claiming the serial
+        // turn: no state.wait guard, no wait for idle, no turn rendering.
+        // The core admits the input durably and the runner picks it up at the
+        // next safe boundary (steer) or when the session would go idle (queue).
+        const runSteer = Effect.fn("RunStreamTransport.runSteer")(function* (next: SessionTurnInput) {
+          if (closed || input.footer.isClosed || state.fault) {
+            return
+          }
+
+          const req = {
+            sessionID: input.sessionID,
+            messageID: next.prompt.messageID,
+            agent: next.agent,
+            model: next.model,
+            variant: next.variant,
+            delivery: next.delivery ?? "steer",
+            parts: [
+              ...(next.includeFiles ? next.files : []),
+              { type: "text" as const, text: next.prompt.text },
+              ...next.prompt.parts,
+            ],
+          }
+          yield* Effect.sync(() => {
+            input.trace?.write("send.steer", req)
+          }).pipe(
+            Effect.andThen(
+              // The SDK rejects the send as a recoverable error (network,
+              // auth, abort); a defect would escape the catch below.
+              Effect.tryPromise(() => input.sdk.session.promptAsync(req, { signal: abort.signal })),
+            ),
+            Effect.tap(() =>
+              Effect.sync(() => {
+                input.trace?.write("send.steer.ok", {
+                  sessionID: input.sessionID,
+                })
+              }),
+            ),
+            Effect.catch((error) =>
+              Effect.sync(() => {
+                if (closed || input.footer.isClosed) {
+                  return
+                }
+
+                input.trace?.write("send.steer.error", {
+                  sessionID: input.sessionID,
+                  error: formatUnknownError(error),
+                })
+              }),
+            ),
+          )
+        })
+
         const selectSubagent = Effect.fn("RunStreamTransport.selectSubagent")((sessionID: string | undefined) =>
           Effect.sync(() => {
             if (closed) {
@@ -1431,6 +1488,7 @@ function createLayer(input: StreamInput) {
 
         return Service.of({
           runPromptTurn,
+          runSteer,
           selectSubagent,
           replayOnResize,
           close,
@@ -1455,6 +1513,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
 
   return {
     runPromptTurn: (next) => runtime.runPromise((svc) => svc.runPromptTurn(next)),
+    runSteer: (next) => runtime.runPromise((svc) => svc.runSteer(next)),
     selectSubagent: (sessionID) => runtime.runSync((svc) => svc.selectSubagent(sessionID)),
     replayOnResize: (next) => runtime.runPromise((svc) => svc.replayOnResize(next)),
     close: () => runtime.runPromise((svc) => svc.close()),

@@ -73,6 +73,11 @@ function footer() {
         fn(next)
       }
     },
+    submitPrompt(prompt: RunPrompt) {
+      for (const fn of [...prompts]) {
+        fn(prompt)
+      }
+    },
     removeQueued(messageID: string) {
       for (const fn of [...queuedRemoves]) fn(messageID)
     },
@@ -477,5 +482,158 @@ describe("run runtime queue", () => {
 
     ui.submit("one")
     await expect(task).rejects.toThrow("boom")
+  })
+
+  test("sends delivery-flagged prompts as direct steers without queuing", async () => {
+    const ui = footer()
+    const steers: RunPrompt[] = []
+    let runs = 0
+
+    const task = runPromptQueue({
+      footer: ui.api,
+      onSteer: (prompt) => {
+        steers.push(prompt)
+      },
+      run: async () => {
+        runs += 1
+        ui.api.close()
+      },
+    })
+
+    ui.submitPrompt({ text: "direct", parts: [], delivery: "steer" })
+    ui.submitPrompt({ text: "hold", parts: [], delivery: "queue" })
+    ui.api.close()
+    await task
+
+    expect(steers.map((item) => item.text)).toEqual(["direct", "hold"])
+    expect(steers.map((item) => item.delivery)).toEqual(["steer", "queue"])
+    expect(steers.map((item) => item.messageID)).toEqual([expect.any(String), expect.any(String)])
+    expect(runs).toBe(0)
+    expect(ui.commits).toEqual([])
+    expect(ui.events.some((event) => event.type === "first")).toBe(false)
+  })
+
+  test("steers ordinary prompts submitted during an active turn", async () => {
+    const ui = footer()
+    const steers: RunPrompt[] = []
+    const turns: string[] = []
+    let wake: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      wake = resolve
+    })
+
+    const task = runPromptQueue({
+      footer: ui.api,
+      onSteer: (prompt) => {
+        steers.push(prompt)
+      },
+      run: async (input) => {
+        turns.push(input.text)
+        await gate
+      },
+    })
+
+    ui.submit("one")
+    await Promise.resolve()
+    await Promise.resolve()
+    ui.submit("two")
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(turns).toEqual(["one"])
+    expect(steers.map((item) => item.text)).toEqual(["two"])
+    expect(steers[0]?.delivery).toBe("steer")
+    expect(steers[0]?.messageID).toEqual(expect.any(String))
+    const queuedPrompts = ui.events
+      .filter((event): event is Extract<FooterEvent, { type: "queued.prompts" }> => event.type === "queued.prompts")
+      .flatMap((event) => event.prompts.map((item) => item.prompt.text))
+    expect(queuedPrompts).toEqual([])
+
+    wake?.()
+    ui.api.close()
+    await task
+
+    expect(turns).toEqual(["one"])
+  })
+
+  test("keeps commands and shell mode queued during an active turn", async () => {
+    const ui = footer()
+    const steers: RunPrompt[] = []
+    const turns: string[] = []
+    let wake: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      wake = resolve
+    })
+
+    const task = runPromptQueue({
+      footer: ui.api,
+      onSteer: (prompt) => {
+        steers.push(prompt)
+      },
+      run: async (input) => {
+        turns.push(input.text)
+        if (turns.length === 1) {
+          await gate
+        } else {
+          ui.api.close()
+        }
+      },
+    })
+
+    ui.submit("one")
+    await Promise.resolve()
+    await Promise.resolve()
+    ui.submit("two")
+    ui.submit("ls", "shell")
+    ui.submit("three")
+
+    expect(steers.map((item) => item.text)).toEqual(["two", "three"])
+    expect(turns).toEqual(["one"])
+
+    wake?.()
+    await task
+    expect(turns).toEqual(["one", "ls"])
+  })
+
+  test("falls back to the serial queue when no onSteer handler is provided", async () => {
+    const ui = footer()
+    const turns: string[] = []
+    let wake: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      wake = resolve
+    })
+
+    const task = runPromptQueue({
+      footer: ui.api,
+      run: async (input) => {
+        turns.push(input.text)
+        if (turns.length === 1) {
+          await gate
+          return
+        }
+
+        if (turns.length === 3) {
+          ui.api.close()
+        }
+      },
+    })
+
+    ui.submit("one")
+    await Promise.resolve()
+    await Promise.resolve()
+    ui.submitPrompt({ text: "queued steer", parts: [], delivery: "steer" })
+    ui.submit("two")
+    await Promise.resolve()
+
+    expect(turns).toEqual(["one"])
+    const event = ui.events.findLast((item) => item.type === "queued.prompts")
+    expect(event?.type === "queued.prompts" ? event.prompts.map((item) => item.prompt.text) : []).toEqual([
+      "queued steer",
+      "two",
+    ])
+
+    wake?.()
+    await task
+    expect(turns).toEqual(["one", "queued steer", "two"])
   })
 })

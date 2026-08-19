@@ -542,6 +542,43 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
 
     const mod = await import("./runtime.queue")
     const createSession = input.createSession
+    const steer = async (prompt: RunPrompt) => {
+      if (state.demo && (await state.demo.prompt(prompt))) {
+        return
+      }
+
+      await state.switching?.catch(() => {})
+
+      try {
+        const next = await ensureStream()
+        await next.handle.runSteer({
+          agent: state.agent,
+          model: state.model,
+          variant: state.activeVariant,
+          prompt,
+          files: input.files,
+          includeFiles: false,
+          delivery: prompt.delivery ?? "steer",
+        })
+      } catch (error) {
+        if (footer.isClosed) {
+          return
+        }
+
+        const text =
+          (await state.stream?.then((item) => item.mod).catch(() => undefined))?.formatUnknownError(error) ??
+          (error instanceof Error ? error.message : String(error))
+        const commit = {
+          kind: "error",
+          text,
+          phase: "start",
+          source: "system",
+          messageID: prompt.messageID,
+        } as const
+        rememberLocal(commit)
+        footer.append(commit)
+      }
+    }
     await mod.runPromptQueue({
       footer,
       initialInput: input.initialInput,
@@ -558,6 +595,22 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
             messageID: prompt.messageID,
           })
         }
+      },
+      onSteer: (prompt) => {
+        state.shown = true
+        state.history.push(prompt)
+        if (prompt.mode !== "shell") {
+          const commit = {
+            kind: "user",
+            text: prompt.text,
+            phase: "start",
+            source: "system",
+            messageID: prompt.messageID,
+          } as const
+          rememberLocal(commit)
+          footer.append(commit)
+        }
+        void steer(prompt)
       },
       onNewSession: createSession
         ? async () => {

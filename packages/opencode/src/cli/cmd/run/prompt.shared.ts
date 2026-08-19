@@ -52,6 +52,44 @@ export function isNewCommand(input: string): boolean {
   return input.trim().toLowerCase() === "/new"
 }
 
+// Marker used by the /anotacion command so the model treats the payload as
+// context to incorporate rather than a change of plan.
+export const ANNOTATION_MARK = {
+  open: "[anotación del usuario]",
+  close: "[/anotación]",
+} as const
+
+export function wrapAnnotation(text: string): string {
+  return `${ANNOTATION_MARK.open}\n${text}\n${ANNOTATION_MARK.close}`
+}
+
+function directivePayload(input: string, name: string): string | undefined {
+  const rest = input.trimStart()
+  if (!rest.toLowerCase().startsWith(name)) {
+    return undefined
+  }
+
+  const tail = rest.slice(name.length)
+  if (tail && tail[0] !== ":" && tail[0] !== " " && tail[0] !== "\t") {
+    return undefined
+  }
+
+  const payload = tail.replace(/^[:\s]+/, "").trim()
+  return payload || undefined
+}
+
+// Returns the trimmed payload of /anotacion (with or without colon/space),
+// or undefined when the text is not an annotation command.
+export function annotationPayload(input: string): string | undefined {
+  return directivePayload(input, "/anotacion")
+}
+
+// Returns the trimmed payload of /cola (with or without colon/space), or
+// undefined when the text is not a queue command.
+export function queuePayload(input: string): string | undefined {
+  return directivePayload(input, "/cola")
+}
+
 export function createPromptHistory(items?: RunPrompt[]): PromptHistoryState {
   const list = (items ?? []).filter((item) => item.text.trim().length > 0).map(promptCopy)
   const next: RunPrompt[] = []

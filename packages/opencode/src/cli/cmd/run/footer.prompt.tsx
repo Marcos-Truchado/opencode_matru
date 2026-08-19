@@ -14,6 +14,7 @@ import path from "path"
 import { createEffect, createMemo, createResource, createSignal, onCleanup, onMount, type Accessor } from "solid-js"
 import * as Locale from "@/util/locale"
 import {
+  annotationPayload,
   createPromptHistory,
   displayCharAt,
   displaySlice,
@@ -22,6 +23,8 @@ import {
   isNewCommand,
   movePromptHistory,
   pushPromptHistory,
+  queuePayload,
+  wrapAnnotation,
 } from "./prompt.shared"
 import { OPENCODE_BASE_MODE, useBindings } from "@opencode-ai/tui/keymap"
 import { realignEditorPromptParts, resolveEditorSlashValue } from "./prompt.editor"
@@ -1175,10 +1178,11 @@ export function createPromptState(input: PromptInput): PromptState {
     }
 
     if (!next.text.trim()) {
-      input.onStatus(input.state().phase === "running" ? "waiting for current response" : "empty prompt ignored")
+      input.onStatus(input.state().phase === "running" ? "escribe para dirigir al modelo sin interrumpir" : "empty prompt ignored")
       return
     }
 
+    const running = input.state().phase === "running"
     const command = next.mode === "shell" ? undefined : selectedCommand(next.text, next.command)
     if (!command && next.mode !== "shell" && isExitCommand(next.text)) {
       input.onExit()
@@ -1192,6 +1196,58 @@ export function createPromptState(input: PromptInput): PromptState {
     if (parsed?.type === "pending") {
       input.onStatus("loading commands")
       return
+    }
+
+    const send = (submit: RunPrompt, status: string) => {
+      resetDraft()
+      input.onStatus(status)
+      queueMicrotask(async () => {
+        if (await input.onSubmit(submit)) {
+          push(next)
+          if (next.mode === "shell") {
+            setShellMode(false)
+            draft = emptyPrompt(false)
+          }
+          return
+        }
+
+        restore(next)
+      })
+    }
+
+    // Mid-run text goes straight to the model as a steer instead of waiting
+    // for the serial queue. Commands, shell mode, and idle submits keep their
+    // existing behavior.
+    if (next.mode !== "shell" && !command) {
+      const annotation = annotationPayload(next.text)
+      if (annotation !== undefined) {
+        if (!annotation) {
+          input.onStatus("uso: /anotacion: <texto>")
+          return
+        }
+
+        send(
+          { ...next, text: wrapAnnotation(annotation), ...(running ? { delivery: "steer" } : {}) },
+          "anotación enviada",
+        )
+        return
+      }
+
+      const queued = queuePayload(next.text)
+      if (queued !== undefined) {
+        if (!queued) {
+          input.onStatus("uso: /cola: <texto>")
+          return
+        }
+
+        send({ ...next, text: queued, ...(running ? { delivery: "queue" } : {}) }, "mensaje añadido a la cola")
+        return
+      }
+
+      if (running && !isNewCommand(next.text)) {
+        send({ ...next, delivery: "steer" }, "steer enviado — el modelo lo aplicará en el siguiente paso")
+        return
+      }
     }
 
     const submit = command

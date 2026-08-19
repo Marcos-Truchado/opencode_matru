@@ -215,6 +215,7 @@ describe("run interactive runtime", () => {
             }, 0)
             return {
               runPromptTurn: async () => {},
+              runSteer: async () => {},
               selectSubagent: () => {},
               replayOnResize: async () => false,
               close: async () => {},

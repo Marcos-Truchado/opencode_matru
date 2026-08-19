@@ -2360,4 +2360,176 @@ describe("run stream transport", () => {
       await transport.close()
     }
   })
+
+  test("runSteer sends the prompt with steer delivery without waiting for idle", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const seen: unknown[] = []
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        promptAsync: async (input) => {
+          seen.push(input)
+          return ok(undefined)
+        },
+        status: async () => ok(statusMap(true)),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await Promise.race([
+        transport.runSteer({
+          agent: undefined,
+          model: undefined,
+          variant: undefined,
+          prompt: { text: "steer me", parts: [] },
+          files: [],
+          includeFiles: false,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("steer timed out")), 1_000)),
+      ])
+
+      expect(seen).toEqual([
+        expect.objectContaining({
+          sessionID: "session-1",
+          delivery: "steer",
+          parts: [{ type: "text", text: "steer me" }],
+        }),
+      ])
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("runSteer forwards queue delivery and attached files", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const seen: unknown[] = []
+    const file: RunFilePart = {
+      type: "file",
+      url: "file:///tmp/a.ts",
+      filename: "a.ts",
+      mime: "text/plain",
+    }
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        promptAsync: async (input) => {
+          seen.push(input)
+          return ok(undefined)
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await transport.runSteer({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hold", parts: [] },
+        files: [file],
+        includeFiles: true,
+        delivery: "queue",
+      })
+
+      expect(seen).toEqual([
+        expect.objectContaining({
+          delivery: "queue",
+          parts: [file, { type: "text", text: "hold" }],
+        }),
+      ])
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("runSteer works while a prompt turn is active", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const ctrl = new AbortController()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "one", parts: [] },
+        files: [],
+        includeFiles: false,
+        signal: ctrl.signal,
+      })
+
+      await expect(
+        Promise.race([
+          transport.runSteer({
+            agent: undefined,
+            model: undefined,
+            variant: undefined,
+            prompt: { text: "two", parts: [] },
+            files: [],
+            includeFiles: false,
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("steer timed out")), 1_000)),
+        ]),
+      ).resolves.toBeUndefined()
+
+      ctrl.abort()
+      await turn
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("runSteer swallows send errors", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        promptAsync: async () => {
+          throw new Error("boom")
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await expect(
+        transport.runSteer({
+          agent: undefined,
+          model: undefined,
+          variant: undefined,
+          prompt: { text: "two", parts: [] },
+          files: [],
+          includeFiles: false,
+        }),
+      ).resolves.toBeUndefined()
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
 })
